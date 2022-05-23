@@ -10,9 +10,7 @@ from pathlib import Path
 
 import utils, dataloader, lstm
 
-
 parser = argparse.ArgumentParser(description='NMT - Seq2Seq with Attention')
-""" recommend to use default settings """
 # environmental settings
 parser.add_argument('--gpu-id', type=int, default=0)
 parser.add_argument('--seed-num', type=int, default=0)
@@ -37,8 +35,11 @@ parser.add_argument('--k', type=int, default=4, help='hyper-paramter for BLEU sc
 
 args = parser.parse_args()
 
-
-if not args.autoregressive:
+if args.teacher_forcing:
+	print(" *** Autoregressive + Teacher Forcing ***")
+elif args.autoregressive:
+	print(" *** Autoregressive ***")
+else:
 	print(" *** Non-Autoregressive ***")
 
 utils.set_random_seed(seed_num=args.seed_num)
@@ -57,8 +58,8 @@ tr_dataset = dataloader.NMTSimpleDataset(max_len=args.max_len,
 										 tgt_filepath='../data/de-en/nmt_simple.tgt.train.txt',
 										 vocab=(vocab_src, vocab_tgt))
 val_dataset = dataloader.NMTSimpleDataset(max_len=args.max_len,
-										  src_filepath='../data/de-en/nmt_simple.src.val.txt',
-										  tgt_filepath='../data/de-en/nmt_simple.tgt.val.txt',
+										  src_filepath='../data/de-en/nmt_simple.src.train.txt',
+										  tgt_filepath='../data/de-en/nmt_simple.tgt.train.txt',
 										  vocab=(tr_dataset.vocab_src, tr_dataset.vocab_tgt))
 vocab_src = tr_dataset.vocab_src
 vocab_tgt = tr_dataset.vocab_tgt
@@ -74,13 +75,13 @@ if not args.attn:
 else:
 	decoder = lstm.AttnDecoder(len(vocab_tgt), args.hidden_size, num_layers=args.num_layers, max_len=args.max_len)
 
+
 utils.init_weights(encoder, init_type='uniform')
 utils.init_weights(decoder, init_type='uniform')
 encoder = encoder.to(device)
 decoder = decoder.to(device)
 
-""" TO DO: (masking) convert this line for masking [PAD] token """
-criterion = nn.NLLLoss()
+criterion = nn.NLLLoss(ignore_index=0)
 
 optimizer_enc = optim.Adam(encoder.parameters(), lr=args.lr)
 optimizer_dec = optim.Adam(decoder.parameters(), lr=args.lr)
@@ -97,38 +98,55 @@ def train(dataloader, epoch):
 	prev_time = time.time()
 	for idx, (src, tgt) in enumerate(dataloader):
 		src, tgt = src.to(device), tgt.to(device)
-
 		optimizer_enc.zero_grad()
 		optimizer_dec.zero_grad()
 
-		"""
-			TO DO: feed the input to Encoder
+		h0 = torch.zeros([args.num_layers, args.batch_size, args.hidden_size]).to(device)
+		c0 = torch.zeros([args.num_layers, args.batch_size, args.hidden_size]).to(device)
+		enc_output, (hn, cn) = encoder(src, (h0, c0))
+		dec_outputs = []
 
-			Encoder
-				input: 
-					(h0, c0)  <- init state for encoder
-					src
-				output:
-					enc_outputs
-					(h, c)
-		"""			
+		# auto-regressive + teacher-forcing (w/, w/o attn)
+		if args.teacher_forcing:
+			dec_input = torch.ones_like(tgt[:, 0]) * vocab_tgt['[EOS]']
+			for i in range(args.max_len):
+				dec_input = dec_input.unsqueeze(1)
+				if args.attn:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn), enc_output, i)
+				else:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn))
+				dec_outputs.append(dec_output)
+				if i+1 >= args.max_len:
+					break
+				dec_input = tgt[:, i + 1]
 
-		"""
-			TO DO: feed the context from Encoder to Decoder
+		# auto-regressive (w/ w/o attn)
+		elif args.autoregressive:
+			dec_input = torch.ones_like(tgt[:, 0]) * vocab_tgt['[EOS]']
+			dec_input = dec_input.unsqueeze(1)
+			for i in range(args.max_len):
+				if args.attn:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn), enc_output, i)
+				else:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn))
+				dec_outputs.append(dec_output)
+				if i + 1 >= args.max_len:
+					break
+				dec_input = torch.argmax(dec_output, dim=-1)
 
-			Decoder
-				input: 
-					(h, c)  	<- context from encoder
-					dec_input
-					enc_outputs <- only attention
-				output:
-					dec_outputs
+		# non auto-regressive (w/, w/o attn)
+		else:
+			for i in range(args.max_len):
+				dec_input = torch.ones_like(tgt[:, 0]) * vocab_tgt['[EOS]']
+				dec_input = dec_input.unsqueeze(1)
+				if args.attn:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn), enc_output, i)
+				else:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn))
+				dec_outputs.append(dec_output)
 
-			* teacher forcing, non-autoregressive might be implemented here
-		"""			
 
 		outputs = torch.stack(dec_outputs, dim=1).squeeze()
-
 		outputs = outputs.reshape(args.batch_size * args.max_len, -1)
 		tgt = tgt.reshape(-1)
 
@@ -136,9 +154,8 @@ def train(dataloader, epoch):
 		tr_loss += loss.item()
 		loss.backward()
 
-		""" TO DO: (clipping) convert this line for clipping the 'gradient < args.max_norm' """
-		torch.nn.utils.clip_grad_norm_(encoder.parameters())
-		torch.nn.utils.clip_grad_norm_(decoder.parameters())
+		torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=args.max_norm)
+		torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=args.max_norm)
 
 		optimizer_enc.step()
 		optimizer_dec.step()
@@ -195,34 +212,24 @@ def validate(dataloader, save=False):
 		for src, tgt in dataloader:
 			src, tgt = src.to(device), tgt.to(device)
 
-			"""
-				TO DO: feed the input to Encoder
+			h0 = torch.zeros([args.num_layers, len(src), args.hidden_size]).to(device)
+			c0 = torch.zeros([args.num_layers, len(src), args.hidden_size]).to(device)
+			enc_output, (hn, cn) = encoder(src, (h0, c0))
 
-				Encoder
-					input: 
-						(h0, c0)  <- init state for encoder
-						src
-					output:
-						enc_outputs
-						(h, c)
-			"""			
-
-			"""
-				TO DO: feed the context from Encoder to Decoder
-
-				Decoder
-					input: 
-						(h, c)  	<- context from encoder
-						dec_input
-						enc_outputs <- only attention
-					output:
-						dec_outputs
-
-				* teacher forcing, non-autoregressive might be implemented here
-			"""			
+			dec_outputs = []
+			dec_input = torch.ones_like(tgt[:, 0]) * vocab_tgt['[EOS]']
+			dec_input = dec_input.unsqueeze(1)
+			for i in range(args.max_len):
+				if args.attn:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn), enc_output, i)
+				else:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn))
+				dec_outputs.append(dec_output)
+				if i + 1 >= args.max_len:
+					break
+				dec_input = torch.argmax(dec_output, dim=-1)
 
 			outputs = torch.stack(dec_outputs, dim=1).squeeze()
-
 			outputs = outputs.reshape(args.batch_size * args.max_len, -1)
 			tgt = tgt.reshape(-1)
 

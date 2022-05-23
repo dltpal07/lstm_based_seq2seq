@@ -44,7 +44,7 @@ class Decoder(nn.Module):
 		x = self.embedding(x)
 		output, state = self.rnn(x, state)
 		output = self.classifier(output)
-	
+
 		return output, state
 
 

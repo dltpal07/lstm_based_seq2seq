@@ -12,7 +12,6 @@ import utils, dataloader, lstm
 
 
 parser = argparse.ArgumentParser(description='NMT - Seq2Seq with Attention')
-""" recommend to use default settings """
 # environmental settings
 parser.add_argument('--gpu-id', type=int, default=0)
 parser.add_argument('--seed-num', type=int, default=0)
@@ -37,6 +36,12 @@ parser.add_argument('--k', type=int, default=4, help='hyper-paramter for BLEU sc
 
 args = parser.parse_args()
 
+if args.teacher_forcing:
+	print(" *** Autoregressive + Teacher Forcing ***")
+elif args.autoregressive:
+	print(" *** Autoregressive ***")
+else:
+	print(" *** Non-Autoregressive ***")
 
 utils.set_random_seed(seed_num=args.seed_num)
 
@@ -52,6 +57,10 @@ tr_dataset = dataloader.NMTSimpleDataset(max_len=args.max_len,
 										 src_filepath='../data/de-en/nmt_simple.src.train.txt',
 										 tgt_filepath='../data/de-en/nmt_simple.tgt.train.txt',
 										 vocab=(vocab_src, vocab_tgt))
+val_dataset = dataloader.NMTSimpleDataset(max_len=args.max_len,
+										  src_filepath='../data/de-en/nmt_simple.src.train.txt',
+										  tgt_filepath='../data/de-en/nmt_simple.tgt.train.txt',
+										  vocab=(tr_dataset.vocab_src, tr_dataset.vocab_tgt))
 ts_dataset = dataloader.NMTSimpleDataset(max_len=args.max_len,
 										 src_filepath='../data/de-en/nmt_simple.src.test.txt',
 										 vocab=(tr_dataset.vocab_src, tr_dataset.vocab_tgt))
@@ -61,7 +70,9 @@ i2w_src = {v:k for k, v in vocab_src.items()}
 i2w_tgt = {v:k for k, v in vocab_tgt.items()}
 
 tr_dataloader = DataLoader(tr_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=2)
+val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, num_workers=2)
 ts_dataloader = DataLoader(ts_dataset, batch_size=args.batch_size, shuffle=False, drop_last=True, num_workers=2)
+
 
 encoder = lstm.Encoder(len(vocab_src), args.hidden_size, num_layers=args.num_layers)
 if not args.attn:
@@ -74,8 +85,7 @@ utils.init_weights(decoder, init_type='uniform')
 encoder = encoder.to(device)
 decoder = decoder.to(device)
 
-""" TO DO: (masking) convert this line for masking [PAD] token """
-criterion = nn.NLLLoss()
+criterion = nn.NLLLoss(ignore_index=0)
 
 optimizer_enc = optim.Adam(encoder.parameters(), lr=args.lr)
 optimizer_dec = optim.Adam(decoder.parameters(), lr=args.lr)
@@ -96,31 +106,50 @@ def train(dataloader, epoch):
 		optimizer_enc.zero_grad()
 		optimizer_dec.zero_grad()
 
-		"""
-			TO DO: feed the input to Encoder
+		h0 = torch.zeros([args.num_layers, args.batch_size, args.hidden_size]).to(device)
+		c0 = torch.zeros([args.num_layers, args.batch_size, args.hidden_size]).to(device)
+		enc_output, (hn, cn) = encoder(src, (h0, c0))
+		dec_outputs = []
 
-			Encoder
-				input: 
-					(h0, c0)  <- init state for encoder
-					src
-				output:
-					enc_outputs
-					(h, c)
-		"""			
+		# auto-regressive + teacher-forcing (w/, w/o attn)
+		if args.teacher_forcing:
+			dec_input = torch.ones_like(tgt[:, 0]) * vocab_tgt['[EOS]']
+			for i in range(args.max_len):
+				dec_input = dec_input.unsqueeze(1)
+				if args.attn:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn), enc_output, i)
+				else:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn))
+				dec_outputs.append(dec_output)
+				if i + 1 >= args.max_len:
+					break
+				dec_input = tgt[:, i + 1]
 
-		"""
-			TO DO: feed the context from Encoder to Decoder
+		# auto-regressive (w/, w/o attn)
+		elif args.autoregressive:
+			dec_input = torch.ones_like(tgt[:, 0]) * vocab_tgt['[EOS]']
+			dec_input = dec_input.unsqueeze(1)
+			for i in range(args.max_len):
+				if args.attn:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn), enc_output, i)
+				else:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn))
+				dec_outputs.append(dec_output)
+				if i + 1 >= args.max_len:
+					break
+				dec_input = torch.argmax(dec_output, dim=-1)
 
-			Decoder
-				input: 
-					(h, c)  	<- context from encoder
-					dec_input
-					enc_outputs <- only attention
-				output:
-					dec_outputs
+		# non auto-regressive (w/, w/o attn)
+		else:
+			dec_input = torch.ones_like(tgt[:, 0]) * vocab_tgt['[EOS]']
+			dec_input = dec_input.unsqueeze(1)
+			for i in range(args.max_len):
+				if args.attn:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn), enc_output, i)
+				else:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn))
+				dec_outputs.append(dec_output)
 
-			* teacher forcing, non-autoregressive might be implemented here
-		"""			
 
 		outputs = torch.stack(dec_outputs, dim=1).squeeze()
 
@@ -131,9 +160,8 @@ def train(dataloader, epoch):
 		tr_loss += loss.item()
 		loss.backward()
 
-		""" TO DO: (clipping) convert this line for clipping the 'gradient < args.max_norm' """
-		torch.nn.utils.clip_grad_norm_(encoder.parameters())
-		torch.nn.utils.clip_grad_norm_(decoder.parameters())
+		torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=args.max_norm)
+		torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=args.max_norm)
 
 		optimizer_enc.step()
 		optimizer_dec.step()
@@ -177,6 +205,73 @@ def train(dataloader, epoch):
 	return tr_loss, tr_acc, tr_score
 
 
+def validate(dataloader, save=False):
+	encoder.eval()
+	decoder.eval()
+	val_loss = 0.
+	correct = 0
+
+	cnt = 0
+	total_score = 0.
+	prev_time = time.time()
+	with torch.no_grad():
+		for src, tgt in dataloader:
+			src, tgt = src.to(device), tgt.to(device)
+
+			h0 = torch.zeros([args.num_layers, len(src), args.hidden_size]).to(device)
+			c0 = torch.zeros([args.num_layers, len(src), args.hidden_size]).to(device)
+			enc_output, (hn, cn) = encoder(src, (h0, c0))
+
+			dec_outputs = []
+			dec_input = torch.ones_like(tgt[:, 0]) * vocab_tgt['[EOS]']
+			dec_input = dec_input.unsqueeze(1)
+			for i in range(args.max_len):
+				if args.attn:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn), enc_output, i)
+				else:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn))
+				dec_outputs.append(dec_output)
+				if i + 1 >= args.max_len:
+					break
+				dec_input = torch.argmax(dec_output, dim=-1)
+
+			outputs = torch.stack(dec_outputs, dim=1).squeeze()
+			outputs = outputs.reshape(args.batch_size * args.max_len, -1)
+			tgt = tgt.reshape(-1)
+
+			loss = criterion(outputs, tgt)
+			val_loss += loss.item()
+
+			pred = outputs.argmax(dim=1, keepdim=True)
+			pred_acc = pred[tgt != 0]
+			tgt_acc = tgt[tgt != 0]
+			correct += pred_acc.eq(tgt_acc.view_as(pred_acc)).sum().item()
+
+			cnt += tgt_acc.shape[0]
+
+			# BLEU score
+			score = 0.
+			with torch.no_grad():
+				pred = pred.reshape(args.batch_size, args.max_len, -1).detach().cpu().tolist()
+				tgt = tgt.reshape(args.batch_size, args.max_len).detach().cpu().tolist()
+				for p, t in zip(pred, tgt):
+					eos_idx = t.index(vocab_tgt['[PAD]']) if vocab_tgt['[PAD]'] in t else len(t)
+					p_seq = [i2w_tgt[i[0]] for i in p][:eos_idx]
+					t_seq = [i2w_tgt[i] for i in t][:eos_idx]
+					k = args.k if len(t_seq) > args.k else len(t_seq)
+					s = utils.bleu_score(p_seq, t_seq, k=k)
+					score += s
+					total_score += s
+
+			score /= args.batch_size
+
+	val_loss /= cnt
+	val_acc = correct / cnt
+	val_score = total_score / len(dataloader.dataset)
+
+	return val_loss, val_acc, val_score
+
+
 def test(dataloader, lengths=None):
 	encoder.eval()
 	decoder.eval()
@@ -188,32 +283,23 @@ def test(dataloader, lengths=None):
 	with torch.no_grad():
 		for src, _ in dataloader:
 			src = src.to(device)
+			h0 = torch.zeros([args.num_layers, len(src), args.hidden_size]).to(device)
+			c0 = torch.zeros([args.num_layers, len(src), args.hidden_size]).to(device)
+			enc_output, (hn, cn) = encoder(src, (h0, c0))
 
-			"""
-				TO DO: feed the input to Encoder
+			dec_outputs = []
+			dec_input = torch.ones_like(src[:, 0]) * vocab_tgt['[EOS]']
+			dec_input = dec_input.unsqueeze(1)
 
-				Encoder
-					input: 
-						(h0, c0)  <- init state for encoder
-						src
-					output:
-						enc_outputs
-						(h, c)
-			"""			
-
-			"""
-				TO DO: feed the context from Encoder to Decoder
-
-				Decoder
-					input: 
-						(h, c)  	<- context from encoder
-						dec_input
-						enc_outputs <- only attention
-					output:
-						dec_outputs
-
-				* teacher forcing, non-autoregressive might be implemented here
-			"""			
+			for i in range(args.max_len):
+				if args.attn:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn), enc_output, i)
+				else:
+					dec_output, (hn, cn) = decoder(dec_input, (hn, cn))
+				dec_outputs.append(dec_output)
+				if i + 1 >= args.max_len:
+					break
+				dec_input = torch.argmax(dec_output, dim=-1)
 
 			outputs = torch.stack(dec_outputs, dim=1).squeeze()
 
@@ -230,8 +316,10 @@ def test(dataloader, lengths=None):
 
 for epoch in range(1, args.n_epochs + 1):
 	tr_loss, tr_acc, tr_score = train(tr_dataloader, epoch)
+	val_loss, val_acc, val_score = validate(val_dataloader)
 	# {format: (loss, acc, BLEU)}
-	print("tr: ({:.4f}, {:5.2f}, {:5.2f}) | ".format(tr_loss, tr_acc * 100, tr_score * 100), end='')
+	print("tr: ({:.4f}, {:5.2f}, {:5.2f}) | ".format(tr_loss, tr_acc * 100, tr_score * 100) + \
+		  "val: ({:.4f}, {:5.2f}, {:5.2f})".format(val_loss, val_acc * 100, val_score * 100), end='')
 
 print("\n[ Elapsed Time: {:.4f} ]".format(time.time() - t_start))
 
