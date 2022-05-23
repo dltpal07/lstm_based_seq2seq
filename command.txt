@@ -1,0 +1,19 @@
+nlp_lab4_dltpal07/
+├── code
+│   ├── dataloader.py
+│   ├── lstm.py
+│   ├── test.py
+│   ├── train.py
+│   ├── make_csv_file.py
+│   ├── utils.py
+│   └── run.sh
+├── command.txt
+├── data
+│   └── de-en
+│       ├── nmt_simple_len.tgt.test.npy
+│       ├── nmt_simple.src.test.txt
+│       ├── nmt_simple.src.train.txt
+│       ├── nmt_simple.src.vocab.pkl
+│       ├── nmt_simple.tgt.train.txt
+│       └── nmt_simple.tgt.vocab.pkl
+└── README.md
