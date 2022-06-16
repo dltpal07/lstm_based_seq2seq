@@ -118,7 +118,7 @@ def train(dataloader, epoch):
 				dec_outputs.append(dec_output)
 				if i+1 >= args.max_len:
 					break
-				dec_input = tgt[:, i + 1]
+				dec_input = tgt[:, i]
 
 		# auto-regressive (w/ w/o attn)
 		elif args.autoregressive:

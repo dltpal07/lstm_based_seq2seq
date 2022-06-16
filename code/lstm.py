@@ -115,7 +115,7 @@ class AttnDecoder(nn.Module):
 		attention = attention.unsqueeze(-1)
 		attention = torch.bmm(attention, output)
 		attention = torch.sum(attention, dim=1, keepdim=True)
-		feature_vector = torch.cat((attention, src_output[:,cur_i].unsqueeze(1)), dim=-1)
+		feature_vector = torch.cat((attention, output.unsqueeze(1)), dim=-1)
 		feature_vector = self.classifier(feature_vector)
 		return feature_vector, state
 
